@@ -14,6 +14,8 @@
 #
 scriptLoggingLevel="DEBUG"
 
+Active_DIR="/opt/active"
+
 C_Clear='\033[0m'
 C_Red='\033[0;31m'
 
@@ -22,31 +24,61 @@ function usage() {
     echo -e "${C_Red}Exited: $1${C_Clear}\n";
   fi
   echo "Usage: $0 [-l log-level]"
-  echo "  -l, --log-level   The Logging Level"
-  echo "                    DEBUG - Provides all logging output"
-  echo "                    INFO  - Provides all but debug messages"
-  echo "                    WARN  - Provides all but debug and info"
-  echo "                    ERROR - Provides all but debug, info and warn"
-  echo "                    SEVERE and CRITICAL are also supported levels as extremes of ERROR"
+  echo " -l 			The Logging Level"
+  echo "			DEBUG - Provides all logging output"
+  echo "			INFO  - Provides all but debug messages"
+  echo "			WARN  - Provides all but debug and info"
+  echo "			ERROR - Provides all but debug, info and warn"
+  echo "			SEVERE and CRITICAL are also supported levels as extremes of ERROR"
   echo ""
-  echo " -p, --pull	    Pull active docker-compose containers"
-  echo " -r, --restart	    Restart Active socker-compose containers"
+  echo " -p			Pull active docker-compose containers"
+  echo " -r			Restart active docker-compose containers"
+  echo " -w			Outputs simlinks to docker-compose config files in ${Active_DIR}"
+  echo " -a			Only uses docker-compose config files in ${Active_DIR}"
   echo "Example: $0 --log-level INFO"
   exit 1
 }
 
-Pull_Con=0
-Restart_Con=0
+unset -v Pull_Con
+unset -v Restart_Con
+unset -v Lnk_Con
+unset -v Acc_Con
+
+ValidLogLevels=("DEBUG" "INFO" "WARN" "ERROR" "SEVERE" "CRITICAL")
 
 # parse params
-while [[ "$#" > 0 ]]; do case $1 in
-  -l|--log-level) scriptLoggingLevel="$2"; shift; shift;;
-  -p|--pull) Pull_Con=1; shift; shift;;
-  -r|--restart) Restart_Con=1; shift; shift;;
-  *) usage "Unknown parameter passed: $1"; shift; shift;;
-esac; done
+while getopts ":l:prwa" opt; do
+    case "${opt}" in
+        l)
+		scriptLoggingLevel=${OPTARG}
+		#check if level exists
+		if [[ ! " ${ValidLogLevels[@]} " =~ " ${scriptLoggingLevel} " ]]
+		then
+		        scriptLoggingLevel="DEBUG"
+		        logThis "ERROR" "Loglevel is invalid switching to DEBUG"
+		fi
+		;;
+        p)
+            Pull_Con=1
+            ;;
+        r)
+            Restart_Con=1
+            ;;
+        w)
+            Lnk_Con=1
+            ;;
+        a)
+            Acc_Con=1
+            ;;
+        *)
+            usage "Unknown parameter passed: ${OPTARG}"
+            ;;
+    esac
+done
 
-if [ "${Pull_Con}" -eq 0 ] && [ "${Restart_Con}" -eq 0 ]; then usage "No Action flag set"; fi;
+if [ -z $Pull_Con ] && [ -z $Restart_Con ] && [ -z $Lnk_Con ]; then
+	usage "No Action flag set"
+fi
 
 function logThis() {
         dateTime=$(date --rfc-3339=seconds)
@@ -77,6 +109,13 @@ function logThis() {
 
 }
 
+function pipeThis() {
+	while read IN
+	do
+		logThis "${1}" "${IN}"
+	done
+}
+
 ValidLogLevels=("DEBUG" "INFO" "WARN" "ERROR" "SEVERE" "CRITICAL")
 
 #check if level exists
@@ -93,23 +132,51 @@ if [[ $EUID -ne 0 ]]; then
         exec sudo /bin/bash "$0" "$@"
 fi
 
+type docker 2>&1 | logThis "DEBUG"
+type docker-compose 2>&1 | logThis "DEBUG"
 
-Compose_Projects=$(sudo docker ps --filter "label=com.docker.compose.project" -q | xargs -I {} sudo docker container inspect {} --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' | uniq)
+if [ -z "${Lnk_Con}" ] && [ -n "${Acc_Con}" ]
+then
+	logThis "INFO" "Reading from ${Active_DIR}"
+	Compose_Projects=($(ls "${Active_DIR}/"*.yaml))
+else
+	docker_containers=$(sudo docker ps --filter "label=com.docker.compose.project" -q)
+	Compose_Projects=()
+	for container in ${docker_containers}; do
+		Compose_Projects+=("$(echo ${container} | xargs -I {} sudo docker container inspect {} --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}')/$(echo ${container} | xargs -I {} sudo docker container inspect {} --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}')")
+	done
+fi
+Compose_Projects=$(for project in "${Compose_Projects[@]}"; do echo "$(readlink -f ${project})"; done | uniq)
 
-Count=$(echo "${Compose_Projects}" | grep -c '^')
+logThis "DEBUG" "${#Compose_Projects[@]} containers found"
 
-logThis "DEBUG" "${Count} containers found"
-
-for working_dir in ${Compose_Projects}; do
-	if [ "${Pull_Con}" -eq 1 ]
+if [ -n "${Lnk_Con}" ] && [ ! -d "${Active_DIR}" ]
+then
+	logThis "DEBUG" "Creating ${Active_DIR}"
+	mkdir -p "${Active_DIR}"
+fi
+for compose_file in ${Compose_Projects}; do
+	working_dir=$(dirname "${compose_file}")
+	logThis "DEBUG" "Working directory ${working_dir}"
+	if [ -n "${Lnk_Con}" ]
+	then
+		project_name=$(basename "${working_dir}")
+		logThis "DEBUG" "Compose file ${compose_file}"
+		logThis "DEBUG" "Destination simlink ${Active_DIR}/${project_name}.yaml"
+		ln -s "${compose_file}" "${Active_DIR}/${project_name}.yaml"
+	fi
+	if [ -n "${Pull_Con}" ]
 	then
 		logThis "INFO" "Pulling ${working_dir}"
-		(cd "$working_dir" && docker-compose pull) 2>&1 | logThis "INFO"
+		cd "$working_dir"
+		docker-compose --no-ansi pull 2>&1 | pipeThis "DEBUG"
 	fi
-        if [ "${Restart_Con}" -eq 1 ]
+        if [ -n "${Restart_Con}" ]
         then
                 logThis "INFO" "Restarting ${working_dir}"
-                (cd "$working_dir" &&  docker-compose down && docker-compose up -d) 2>&1 | logThis "INFO"
+		cd "$working_dir"
+		docker-compose --no-ansi down 2>&1 | pipeThis "DEBUG"
+		docker-compose --no-ansi up -d 2>&1 | pipeThis "DEBUG"
         fi
 
 done
