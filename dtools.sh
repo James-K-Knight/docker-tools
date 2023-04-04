@@ -126,8 +126,8 @@ then
 fi
 
 
-# Make sure only root can run our script
-if [[ $EUID -ne 0 ]]; then
+# Make sure only docker group members or a superuser can run our script
+if [[ ! $(id | grep "docker") && $EUID -ne 0 ]]; then
         logThis "WARN" "This script must be run as root"
         exec sudo /bin/bash "$0" "$@"
 fi
