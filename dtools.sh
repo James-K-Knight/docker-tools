@@ -169,14 +169,14 @@ for compose_file in ${Compose_Projects}; do
 	then
 		logThis "INFO" "Pulling ${working_dir}"
 		cd "$working_dir"
-		docker-compose --no-ansi pull 2>&1 | pipeThis "DEBUG"
+		docker-compose --ansi never pull 2>&1 | pipeThis "DEBUG"
 	fi
         if [ -n "${Restart_Con}" ]
         then
                 logThis "INFO" "Restarting ${working_dir}"
 		cd "$working_dir"
-		docker-compose --no-ansi down 2>&1 | pipeThis "DEBUG"
-		docker-compose --no-ansi up -d 2>&1 | pipeThis "DEBUG"
+		docker-compose --ansi never down 2>&1 | pipeThis "DEBUG"
+		docker-compose --ansi never up -d 2>&1 | pipeThis "DEBUG"
         fi
 
 done
